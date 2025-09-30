@@ -1,4 +1,4 @@
-# Lightweight dependencies for basic video search
+# Core dependencies for video search
 torch>=2.0.0
 numpy>=1.24.0
 opencv-python>=4.8.0
@@ -10,11 +10,10 @@ tqdm>=4.65.0
 matplotlib>=3.7.0
 scipy>=1.11.0
 
-# Lightweight text encoder
+# Text encoder and captioning
 sentence-transformers>=2.2.2
+transformers>=4.31.0
 
-# Note: This lightweight version doesn't require:
-# - transformers (for BLIP)
-# - CLIP-by-OpenAI (uses sentence transformers instead)
-# - segment-anything (no advanced object detection)
-# - grad-cam (no visual explanations)
+# Notes:
+# - We do NOT use CLIP; no CLIP dependency required
+# - segment-anything / grad-cam are not required
