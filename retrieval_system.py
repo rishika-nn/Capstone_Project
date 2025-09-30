@@ -21,7 +21,7 @@ from config import (
     RERANK_TOP_K,
     INDEX_DIR
 )
-from feature_extractor import SemanticFeatureExtractor
+from feature_extractor import LightweightFeatureExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -153,8 +153,8 @@ class FAISSIndex:
 class VideoRetrievalSystem:
     """Main retrieval system for video search."""
     
-    def __init__(self, feature_extractor: SemanticFeatureExtractor = None):
-        self.feature_extractor = feature_extractor or SemanticFeatureExtractor()
+    def __init__(self, feature_extractor: LightweightFeatureExtractor = None):
+        self.feature_extractor = feature_extractor or LightweightFeatureExtractor()
         self.faiss_index = None
         self.caption_index = {}  # Text-based index for caption search
         
