@@ -549,10 +549,10 @@ class EnhancedRetrieval:
 
 if __name__ == "__main__":
     # Example usage
-    from feature_extractor import SemanticFeatureExtractor
+    from feature_extractor import LightweightFeatureExtractor
     
     # Initialize enhancement system
-    feature_extractor = SemanticFeatureExtractor()
+    feature_extractor = LightweightFeatureExtractor()
     enhancement_system = EnhancedRetrieval(feature_extractor)
     
     # Example query expansion
