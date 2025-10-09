@@ -102,7 +102,7 @@ class FrameExtractor:
             return None
         
         # Save frame
-        frame_filename = f"{video_path.stem}_frame_{frame_number:06d}_{timestamp:.2f}s.jpg"
+        frame_filename = f"{video_path.stem}_frame_{int(frame_number):06d}_{float(timestamp):.2f}s.jpg"
         frame_path = output_dir / frame_filename
         pil_image.save(frame_path, quality=95)
         
@@ -110,8 +110,8 @@ class FrameExtractor:
         self.frame_hashes[frame_hash] = frame_path
         
         return {
-            "frame_number": frame_number,
-            "timestamp": timestamp,
+            "frame_number": int(frame_number),
+            "timestamp": float(timestamp),
             "frame_path": str(frame_path),
             "video_path": str(video_path),
             "hash": str(frame_hash)
@@ -210,13 +210,13 @@ class FrameExtractor:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
                 ret, frame = cap.read()
                 if ret:
-                    timestamp = frame_idx / fps
+                    timestamp = float(frame_idx) / float(fps)
                     frame_data = self._process_frame(
                         frame, frame_idx, timestamp, video_path, output_dir
                     )
                     if frame_data:
-                        frame_data["shot_idx"] = shot_idx
-                        frame_data["shot_time"] = (start_time, end_time)
+                        frame_data["shot_idx"] = int(shot_idx)
+                        frame_data["shot_time"] = [float(start_time), float(end_time)]
                         extracted_frames.append(frame_data)
         
         cap.release()
