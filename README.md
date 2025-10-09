@@ -11,30 +11,7 @@ A comprehensive offline, keyframe-based retrieval pipeline for text-driven video
 - **Object Grounding**: Optional caption-based object detection
 - **Interactive Interface**: Command-line and interactive search modes
 
-## Lightweight vs Full Pipeline Comparison
-
-| Feature | Lightweight | Full Pipeline |
-|---------|-------------|---------------|
-| **Model Size** | ~80MB (sentence transformer) | ~1GB (BLIP + sentence transformer) |
-| **Memory Usage** | 2-4GB RAM | 6-8GB RAM |
-| **Setup Time** | 2-3 minutes | 10-15 minutes |
-| **Processing Speed** | Fast | Moderate |
-| **Caption Quality** | Basic (CV-based) | High (BLIP) |
-| **Search Accuracy** | Good | Excellent |
-| **Dependencies** | Minimal | Heavy |
-| **Best For** | Quick setup, basic search | Research, production |
-
-### When to Use Lightweight Version:
-- Quick prototyping and testing
-- Limited computational resources
-- Simple search requirements
-- Educational purposes
-
-### When to Use Full Pipeline:
-- Production deployments
-- Maximum search accuracy needed
-- Rich caption generation required
-- Research applications
+<!-- Removed legacy lightweight/full comparison to streamline README -->
 
 ## Architecture Overview
 
@@ -46,38 +23,10 @@ Videos → Frame Extraction → Feature Extraction → Indexing → Enhanced Ret
 
 ## Installation
 
-### Prerequisites
-
-- Python 3.8+
-- CUDA-capable GPU (recommended for faster processing)
-- At least 4GB RAM (8GB for full pipeline)
-
-### Setup Options
-
-#### Option 1: Lightweight Version (Recommended)
-For faster setup and lower resource usage:
-
-```bash
-pip install -r requirements_lightweight.txt
-```
-
-This version uses:
-- Sentence Transformers for text encoding
-- Simple computer vision for image features (instead of BLIP)
-- No heavy vision-language models
-
-#### Option 2: Full Pipeline
-For maximum accuracy with heavy models:
-
+Prerequisites: Python 3.8+, optional CUDA GPU. Install deps:
 ```bash
 pip install -r requirements.txt
 ```
-
-This includes BLIP and advanced features.
-
-3. Download required models (done automatically on first run):
-   - **Lightweight**: Sentence transformer model (~80MB)
-   - **Full**: Sentence transformer model (~80MB)
 
 ## Quick Start
 
@@ -94,43 +43,58 @@ data/
 ```
 
 ### 2. Build the Search Index
-
-#### Lightweight Version:
-```bash
-python lightweight_pipeline.py build
-```
-
-#### Full Pipeline:
 ```bash
 python video_search_pipeline.py build
 ```
 
-This will:
-- Extract keyframes from all videos
-- **Lightweight**: Generate simple captions + extract visual features + sentence transformer embeddings
-- **Full**: Generate captions using BLIP + sentence transformer embeddings
-- Build FAISS index for fast search
+This will extract keyframes, generate captions + embeddings, and build a FAISS index.
 
-### 3. Search for Frames
+### Run on Google Colab
 
-#### Lightweight Version:
+1. Clone and install
 ```bash
-python lightweight_pipeline.py search "a black bag"
+!git clone https://github.com/rishika-nn/Capstone_Project capstone
+%cd capstone
+!pip install -r requirements.txt
 ```
 
-#### Full Pipeline:
+2. Provide videos in `data/videos/`
+- Upload via Colab left Files pane into `data/videos/`, or mount Drive:
+```python
+from google.colab import drive
+drive.mount('/content/drive')
+```
+```bash
+!mkdir -p data
+!rm -f data/videos
+!ln -s "/content/drive/MyDrive/your_videos_folder" data/videos
+!ls -lah data/videos
+```
+
+3. Build index
+```bash
+!python video_search_pipeline.py build --segment-captions --object-tags --force-rebuild
+```
+
+4. Search
+```bash
+!python video_search_pipeline.py search "a black bag" --max-results 20
+```
+
+Notes:
+- The pipeline automatically falls back to a Flat FAISS index for small datasets (too few vectors for IVF training).
+- If you previously had a partial build, clean outputs and rebuild:
+```bash
+!rm -rf data/keyframes data/features data/index
+!python video_search_pipeline.py build --force-rebuild
+```
+
+### 3. Search for Frames
 ```bash
 python video_search_pipeline.py search "a black bag"
 ```
 
 ### 4. Interactive Mode
-
-#### Lightweight Version:
-```bash
-python lightweight_pipeline.py interactive
-```
-
-#### Full Pipeline:
 ```bash
 python video_search_pipeline.py interactive
 ```
@@ -171,26 +135,10 @@ python video_search_pipeline.py search "person walking" --save-results ./results
 python video_search_pipeline.py stats
 ```
 
-### Interactive Mode
-
-Start interactive mode for multiple searches:
-
-```bash
-python video_search_pipeline.py interactive
-```
-
-Available commands:
-- `search <query>` - Search for frames
-- `stats` - Show pipeline statistics
-- `quit` - Exit
-
-Example session:
-```
-> search a person carrying a black bag
-> stats
-> search red car
-> quit
-```
+### Interactive commands
+- `search <query>`
+- `stats`
+- `quit`
 
 ## File Structure
 
@@ -209,6 +157,14 @@ Example session:
     ├── features/                # Extracted features and embeddings
     ├── index/                   # FAISS index files
     └── logs/                    # Log files
+
+Required contents before build:
+- `data/videos/` must contain at least one video file (.mp4/.avi/.mov/.mkv/.flv/.wmv)
+
+Expected contents after build:
+- `data/keyframes/*.jpg` and per-video metadata JSON
+- `data/features/frame_features.json`, `embeddings.npy`, `feature_metadata.json`
+- `data/index/faiss_index.bin`, `metadata.json`, `config.json`, `caption_index.json`
 ```
 
 ## Configuration
@@ -237,7 +193,6 @@ FAISS_INDEX_TYPE = "IVF"         # Index type: "IVF", "HNSW", or "Flat"
 ### Models
 ```python
 BLIP_MODEL_NAME = "Salesforce/blip-image-captioning-base"
-# CLIP not used; we use a sentence transformer
 ```
 
 ## Advanced Features
@@ -288,109 +243,17 @@ adapted_embeddings = domain_adaptation.adapt_to_campus_environment(
 )
 ```
 
-## API Usage
+<!-- API usage examples removed to keep README concise -->
 
-### Python API
+## Performance Tips (brief)
+- Use GPU in Colab for faster feature extraction.
+- For large datasets, reduce `FRAME_EXTRACTION_RATE` in `config.py`.
 
-```python
-from video_search_pipeline import VideoSearchPipeline
-
-# Initialize pipeline
-pipeline = VideoSearchPipeline()
-pipeline.setup_pipeline()
-
-# Build index
-pipeline.build_index(Path("data/videos"))
-
-# Load existing index
-pipeline.load_index()
-
-# Search
-results = pipeline.search("a person with a black bag")
-
-# Get thumbnails
-thumbnails = pipeline.get_result_thumbnails(results)
-```
-
-### Individual Components
-
-```python
-from frame_extractor import extract_frames_from_videos
-from feature_extractor import extract_features_from_frames
-from retrieval_system import build_retrieval_system
-
-# Extract frames
-frames = extract_frames_from_videos(video_dir, output_dir)
-
-# Extract features
-features = extract_features_from_frames(frames, features_dir)
-
-# Build retrieval system
-retrieval_system = build_retrieval_system(features_file, index_dir)
-```
-
-## Performance Optimization
-
-### GPU Acceleration
-
-The system automatically uses GPU if available. To force CPU usage:
-
-```bash
-CUDA_VISIBLE_DEVICES="" python video_search_pipeline.py build
-```
-
-### Memory Optimization
-
-For large video collections:
-
-1. Reduce `FRAME_EXTRACTION_RATE` to extract fewer frames
-2. Increase `PERCEPTUAL_HASH_THRESHOLD` for more aggressive deduplication
-3. Use `FAISS_INDEX_TYPE = "IVF"` for faster search with large indices
-
-### Batch Processing
-
-The system processes videos in batches. Adjust batch sizes in the configuration:
-
-```python
-# In feature_extractor.py
-batch_size = 8  # Reduce if memory issues
-```
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Out of Memory**
-   - Reduce batch size in feature extraction
-   - Use CPU instead of GPU
-   - Process videos in smaller batches
-
-2. **Model Download Fails**
-   - Check internet connection
-   - Manually download models to `~/.cache/transformers/`
-
-3. **Poor Search Results**
-   - Enable enhanced retrieval
-   - Try different query formulations
-   - Check if captions are meaningful
-
-4. **Slow Performance**
-   - Use GPU acceleration
-   - Reduce number of extracted frames
-   - Use IVF index type for large datasets
-
-### Debug Mode
-
-Enable debug logging:
-
-```python
-# In config.py
-LOG_LEVEL = "DEBUG"
-```
-
-### Log Files
-
-Check logs in `data/logs/video_search.log` for detailed information.
+## Troubleshooting (quick)
+- No videos found: ensure files exist in `data/videos/` or pass `--videos-dir`.
+- Partial/failed build: `rm -rf data/keyframes data/features data/index` then rebuild with `--force-rebuild`.
+- Small dataset IVF error: the system auto-falls back to Flat index.
+- Search errors: recent updates pad query embeddings to index dim; rebuild if you changed feature shapes.
 
 ## Evaluation
 
