@@ -171,8 +171,9 @@ class VideoSearchPipeline:
             logger.info(f"Found {len(results)} results")
             return results[:max_results]
             
-        except Exception as e:
-            logger.error(f"Search failed: {e}")
+        except Exception:
+            # Log full traceback for easier debugging
+            logger.exception("Search failed")
             return []
     
     def get_result_thumbnails(self, results: List[Dict], 

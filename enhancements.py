@@ -293,14 +293,18 @@ class MultiModalFusion:
             # Get textual similarity (caption-based)
             caption = result["metadata"]["caption"]
             caption_embedding = self.feature_extractor.extract_text_embedding(caption)
-            textual_similarity = np.dot(query_embedding, caption_embedding) / (
-                np.linalg.norm(query_embedding) * np.linalg.norm(caption_embedding)
-            )
+            # Safe cosine similarity to avoid divide-by-zero/NaN
+            qn = np.linalg.norm(query_embedding)
+            cn = np.linalg.norm(caption_embedding)
+            if qn == 0 or cn == 0:
+                textual_similarity = 0.0
+            else:
+                textual_similarity = float(np.dot(query_embedding, caption_embedding) / (qn * cn))
             
             # Compute word overlap
             query_words = set(query.lower().split())
             caption_words = set(caption.lower().split())
-            word_overlap = len(query_words.intersection(caption_words)) / len(query_words)
+            word_overlap = (len(query_words.intersection(caption_words)) / len(query_words)) if query_words else 0.0
             
             # Fuse scores
             fused_score = (
