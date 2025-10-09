@@ -70,9 +70,16 @@ class VideoSearchPipeline:
         """
         logger.info("Starting index building process...")
         
-        # Check if index already exists
-        if INDEX_DIR.exists() and not force_rebuild:
-            logger.info("Index already exists. Use --force-rebuild to rebuild.")
+        # Check if index already exists (validate required files, not just directory)
+        index_files = [
+            INDEX_DIR / "faiss_index.bin",
+            INDEX_DIR / "metadata.json",
+            INDEX_DIR / "config.json",
+            INDEX_DIR / "caption_index.json"
+        ]
+        has_complete_index = all(p.exists() for p in index_files)
+        if has_complete_index and not force_rebuild:
+            logger.info("Existing index detected. Skipping rebuild. Use --force-rebuild to rebuild.")
             return True
         
         try:
