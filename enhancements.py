@@ -20,7 +20,9 @@ from config import (
     TEMPORAL_CLUSTER_THRESHOLD,
     MAX_TEMPORAL_GAP,
     QUERY_EXPANSION_MODEL,
-    MAX_EXPANDED_QUERIES
+    MAX_EXPANDED_QUERIES,
+    RERANK_TOP_K,
+    TOP_K_RESULTS
 )
 
 logger = logging.getLogger(__name__)

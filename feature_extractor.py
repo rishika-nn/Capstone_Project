@@ -568,12 +568,19 @@ def extract_features_from_frames(frame_metadata: List[Dict],
                 seg_text_emb = np.mean(emb_list, axis=0)
             else:
                 seg_text_emb = extractor.extract_text_embedding(seg_caption)
-            # Create combined embedding using only text to keep it compact
-            combined_emb = seg_text_emb
+            # Create combined embedding by pairing visual features (from a representative image)
+            # with the aggregated text embedding to match frame-level dimensionality
             seg_tags = sorted({t for tags in tags_lists for t in tags})
             rep_image = seg[0]["f"].get("image_path")
             seg_start_ts = seg[0]["timestamp"]
             seg_end_ts = seg[-1]["timestamp"]
+            # Extract visual features for representative frame (fixed 512-dim)
+            try:
+                seg_visual_feat = extractor.extract_visual_features(Path(rep_image))
+            except Exception:
+                seg_visual_feat = np.zeros(512, dtype=np.float32)
+            # Concatenate to match frame-level embedding layout
+            combined_emb = np.concatenate([seg_visual_feat, seg_text_emb])
             segment_features.append({
                 "image_path": rep_image,
                 "caption": seg_caption,
