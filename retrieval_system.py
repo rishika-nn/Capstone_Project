@@ -245,8 +245,27 @@ class VideoRetrievalSystem:
         if self.faiss_index is None:
             raise ValueError("Index not loaded. Call load_retrieval_index() first.")
         
-        # Extract query embedding
-        query_embedding = self.feature_extractor.extract_text_embedding(query)
+        # Extract query embedding (text only)
+        query_text_emb = self.feature_extractor.extract_text_embedding(query)
+        # Align query embedding dimensionality to index embedding_dim
+        if self.faiss_index is None:
+            raise ValueError("Index not loaded. Call load_retrieval_index() first.")
+        index_dim = self.faiss_index.embedding_dim
+        q_dim = len(query_text_emb) if hasattr(query_text_emb, '__len__') else 0
+        if q_dim == index_dim:
+            query_embedding = np.asarray(query_text_emb, dtype=np.float32)
+        elif q_dim < index_dim and q_dim > 0:
+            # Our stored vectors are [visual(512) || text(384)]. Pad the missing visual part with zeros.
+            pad_len = index_dim - q_dim
+            query_embedding = np.concatenate([np.zeros(pad_len, dtype=np.float32), 
+                                              np.asarray(query_text_emb, dtype=np.float32)])
+        else:
+            # Fallback: truncate or zero if shapes are unexpected
+            qe = np.asarray(query_text_emb, dtype=np.float32)
+            if qe.size > index_dim:
+                query_embedding = qe[:index_dim]
+            else:
+                query_embedding = np.zeros(index_dim, dtype=np.float32)
         
         # Perform vector similarity search
         if use_caption_filtering:
