@@ -48,14 +48,19 @@ class FAISSIndex:
         # Normalize embeddings for cosine similarity
         faiss.normalize_L2(embeddings)
         
+        n_vectors = embeddings.shape[0]
         if self.index_type == "IVF":
-            # IVF (Inverted File) index
-            quantizer = faiss.IndexFlatIP(self.embedding_dim)  # Inner product for cosine similarity
-            self.index = faiss.IndexIVFFlat(quantizer, self.embedding_dim, FAISS_NLIST)
-            
-            # Train the index
-            logger.info("Training IVF index...")
-            self.index.train(embeddings)
+            # Use IVF only if we have enough vectors to train clusters
+            if n_vectors >= max(FAISS_NLIST, 100):
+                quantizer = faiss.IndexFlatIP(self.embedding_dim)  # Inner product for cosine similarity
+                self.index = faiss.IndexIVFFlat(quantizer, self.embedding_dim, FAISS_NLIST)
+                logger.info("Training IVF index...")
+                self.index.train(embeddings)
+            else:
+                logger.warning(
+                    f"Too few vectors ({n_vectors}) for IVF with nlist={FAISS_NLIST}. Falling back to Flat index."
+                )
+                self.index = faiss.IndexFlatIP(self.embedding_dim)
             
         elif self.index_type == "HNSW":
             # HNSW (Hierarchical Navigable Small World) index
