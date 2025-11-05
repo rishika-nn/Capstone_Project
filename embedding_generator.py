@@ -1,10 +1,11 @@
 """
-Text Embedding Generation Module
-Converts captions into dense vector embeddings for semantic search
+Text and Image Embedding Generation Module
+Converts captions into dense vectors and images into CLIP vectors for multi-modal search
 """
 
 import numpy as np
 from sentence_transformers import SentenceTransformer
+from transformers import CLIPProcessor, CLIPModel
 import torch
 import logging
 from typing import List, Optional, Union, Tuple, Dict
@@ -12,6 +13,7 @@ from tqdm import tqdm
 import gc
 from dataclasses import dataclass
 from caption_generator import CaptionedFrame
+from frame_extractor import FrameData
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -423,6 +425,92 @@ class TextEmbeddingGenerator:
         del self.model
         self.clear_cache()
         logger.info("Embedding model unloaded")
+
+
+class ClipMultiModalEncoder:
+    """Encode images and texts into CLIP embedding space for multi-modal search."""
+    def __init__(self,
+                 model_name: str = "openai/clip-vit-base-patch32",
+                 use_gpu: bool = True,
+                 normalize: bool = True):
+        self.model_name = model_name
+        self.normalize = normalize
+        self.device = 'cuda' if torch.cuda.is_available() and use_gpu else 'cpu'
+        logger.info(f"Loading CLIP model: {self.model_name} on {self.device}")
+        self.model = CLIPModel.from_pretrained(self.model_name).to(self.device)
+        self.processor = CLIPProcessor.from_pretrained(self.model_name)
+        self.model.eval()
+
+    def encode_images(self, frames: List[FrameData], batch_size: int = 16) -> np.ndarray:
+        if not frames:
+            return np.zeros((0, self.get_dim()), dtype=np.float32)
+        embeddings = []
+        for i in tqdm(range(0, len(frames), batch_size), desc="CLIP img enc"):
+            batch = frames[i:i+batch_size]
+            images = [f.image for f in batch]
+            inputs = self.processor(images=images, return_tensors="pt", padding=True)
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            with torch.no_grad():
+                img_feats = self.model.get_image_features(**inputs)
+                img_feats = img_feats / img_feats.norm(p=2, dim=-1, keepdim=True)
+            embeddings.append(img_feats.cpu().numpy())
+        return np.vstack(embeddings)
+
+    def encode_texts(self, texts: List[str], batch_size: int = 32) -> np.ndarray:
+        if not texts:
+            return np.zeros((0, self.get_dim()), dtype=np.float32)
+        embeddings = []
+        for i in tqdm(range(0, len(texts), batch_size), desc="CLIP txt enc"):
+            batch = texts[i:i+batch_size]
+            inputs = self.processor(text=batch, return_tensors="pt", padding=True)
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            with torch.no_grad():
+                txt_feats = self.model.get_text_features(**inputs)
+                txt_feats = txt_feats / txt_feats.norm(p=2, dim=-1, keepdim=True)
+            embeddings.append(txt_feats.cpu().numpy())
+        return np.vstack(embeddings)
+
+    def encode_query_text(self, query: str) -> np.ndarray:
+        vec = self.encode_texts([query])
+        return vec[0] if vec.shape[0] else np.zeros((self.get_dim(),), dtype=np.float32)
+
+    def get_dim(self) -> int:
+        # CLIP ViT-B/32 dimension is typically 512
+        # Infer from model config if available
+        try:
+            return int(self.model.visual_projection.out_features)
+        except Exception:
+            return 512
+
+    def unload(self):
+        del self.model
+        del self.processor
+        if self.device == 'cuda':
+            torch.cuda.empty_cache()
+        gc.collect()
+
+
+def extract_object_attribute_tags(caption: str) -> List[str]:
+    """Simple heuristic tag extractor from caption: colors + nouns tokens."""
+    if not caption:
+        return []
+    colors = {
+        'black','white','gray','grey','red','orange','yellow','green','blue','purple','pink','brown','beige','tan','gold','silver','navy','maroon','teal'
+    }
+    tokens = [t.strip('.,;:!?').lower() for t in caption.split()]
+    tags = [t for t in tokens if t in colors]
+    # Add simple noun-like tokens (very naive fallback)
+    for t in tokens:
+        if t.isalpha() and len(t) > 2 and t not in tags and t not in colors:
+            # Prefer a small set of common object words
+            if t in {"person","man","woman","girl","boy","bag","backpack","bottle","phone","laptop","car","bike","bicycle","shirt","pants","shoes","jacket","hat","table"}:
+                tags.append(t)
+    # Deduplicate preserve order
+    seen = set(); ordered = []
+    for t in tags:
+        if t not in seen:
+            seen.add(t); ordered.append(t)
+    return ordered
 
 
 # Example usage and testing

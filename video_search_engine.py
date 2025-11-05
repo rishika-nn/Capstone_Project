@@ -17,7 +17,7 @@ import numpy as np
 from video_search_config import Config
 from frame_extractor import VideoFrameExtractor, FrameData
 from caption_generator import BlipCaptionGenerator, CaptionedFrame
-from embedding_generator import TextEmbeddingGenerator, EmbeddedFrame
+from embedding_generator import TextEmbeddingGenerator, EmbeddedFrame, ClipMultiModalEncoder, extract_object_attribute_tags
 from pinecone_manager import PineconeManager, SearchResult
 from object_caption_pipeline import ObjectCaptionPipeline, ObjectCaption
 from motion_analyzer import MotionAnalyzer
@@ -101,13 +101,22 @@ class VideoSearchEngine:
                 normalize=True
             )
             logger.info("Embedding generator initialized")
+        if not hasattr(self, 'clip_encoder'):
+            self.clip_encoder = ClipMultiModalEncoder(
+                model_name=self.config.CLIP_MODEL_NAME,
+                use_gpu=self.config.USE_GPU,
+                normalize=True
+            )
+            logger.info("CLIP multi-modal encoder initialized")
         
         if not self.pinecone_manager:
             self.pinecone_manager = PineconeManager(
                 api_key=self.config.PINECONE_API_KEY,
                 environment=self.config.PINECONE_ENVIRONMENT,
-                index_name=self.config.PINECONE_INDEX_NAME,
-                dimension=self.config.PINECONE_DIMENSION,
+                text_index_name=self.config.PINECONE_TEXT_INDEX_NAME,
+                text_dimension=self.config.PINECONE_TEXT_DIMENSION,
+                image_index_name=self.config.PINECONE_IMAGE_INDEX_NAME,
+                image_dimension=self.config.PINECONE_IMAGE_DIMENSION,
                 metric=self.config.PINECONE_METRIC,
                 host=getattr(self.config, 'PINECONE_HOST', None)
             )
@@ -177,6 +186,23 @@ class VideoSearchEngine:
                 video_path=video_path,
                 use_similarity_filter=True
             )
+
+            # Optional: Semantic dedup using CLIP image embeddings
+            if getattr(self.config, 'SEMANTIC_DEDUP_ENABLED', True) and frames:
+                logger.info("Applying semantic deduplication with CLIP embeddings...")
+                img_embs = self.clip_encoder.encode_images(frames)
+                keep_mask = np.ones(len(frames), dtype=bool)
+                thr = float(getattr(self.config, 'SEMANTIC_DEDUP_SIM_THRESHOLD', 0.90))
+                for i in range(len(frames)):
+                    if not keep_mask[i]:
+                        continue
+                    vi = img_embs[i]
+                    sims = np.dot(img_embs[i+1:], vi)
+                    for j, s in enumerate(sims, start=i+1):
+                        if keep_mask[j] and s >= thr:
+                            keep_mask[j] = False
+                frames = [f for f, k in zip(frames, keep_mask) if k]
+                logger.info(f"Semantic dedup kept {len(frames)} frames")
             
             if save_frames:
                 output_dir = os.path.join(self.config.OUTPUT_DIR, video_name, "frames")
@@ -251,8 +277,9 @@ class VideoSearchEngine:
                 )
             logger.info(f"After deduplication: {len(embedded_frames)} unique embeddings")
             
-            # Step 4: Upload to Pinecone
-            actual_uploaded = 0
+            # Step 4: Upload to Pinecone (text and image indexes)
+            uploaded_text = 0
+            uploaded_image = 0
             if upload_to_pinecone:
                 logger.info("Step 4/4: Uploading to Pinecone...")
                 pinecone_data = self.embedding_generator.prepare_for_pinecone(
@@ -260,16 +287,51 @@ class VideoSearchEngine:
                     video_name=video_name,
                     source_file_path=video_path
                 )
+                # Add structured tags to metadata
+                enriched = []
+                for (vid, vec, meta) in pinecone_data:
+                    meta = dict(meta)
+                    meta['tags'] = extract_object_attribute_tags(meta.get('caption', ''))
+                    meta['modality'] = 'text'
+                    enriched.append((vid, vec, meta))
                 
-                actual_uploaded = self.pinecone_manager.upload_embeddings(
-                    data=pinecone_data,
-                    batch_size=self.config.PINECONE_BATCH_SIZE
+                uploaded_text = self.pinecone_manager.upload_embeddings(
+                    data=enriched,
+                    batch_size=self.config.PINECONE_BATCH_SIZE,
+                    target='text'
                 )
+
+                # Also upload CLIP image embeddings per frame (one per frame)
+                try:
+                    # Build image vectors aligned to the kept captioned frames' frame_data
+                    unique_frames = [cf.frame_data for cf in captioned_frames]
+                    img_vecs = self.clip_encoder.encode_images(unique_frames)
+                    image_data = []
+                    for cf, vec in zip(captioned_frames, img_vecs):
+                        uid = f"{cf.frame_data.frame_id}_img"
+                        meta = {
+                            'timestamp': cf.frame_data.timestamp,
+                            'caption': cf.caption,
+                            'frame_id': cf.frame_data.frame_id,
+                            'frame_index': cf.frame_data.frame_index,
+                            'video_name': video_name,
+                            'source_file_path': video_path,
+                            'tags': extract_object_attribute_tags(cf.caption),
+                            'modality': 'image'
+                        }
+                        image_data.append((uid, vec.tolist(), meta))
+                    uploaded_image = self.pinecone_manager.upload_embeddings(
+                        data=image_data,
+                        batch_size=self.config.PINECONE_BATCH_SIZE,
+                        target='image'
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed uploading image embeddings: {e}")
                 
                 # Print verification
-                if actual_uploaded > 0:
-                    sample_ids = [pinecone_data[i][0] for i in range(min(3, len(pinecone_data)))]
-                    logger.info(f"✅ Pinecone upsert confirmed: {actual_uploaded} vectors uploaded for {video_name}")
+                if uploaded_text > 0 or uploaded_image > 0:
+                    sample_ids = [enriched[i][0] for i in range(min(3, len(enriched)))]
+                    logger.info(f"✅ Pinecone upsert confirmed: text={uploaded_text}, image={uploaded_image} for {video_name}")
                     logger.info(f"   Sample IDs: {', '.join(sample_ids)}...")
                 else:
                     logger.warning("No vectors were successfully uploaded to Pinecone")
@@ -292,7 +354,8 @@ class VideoSearchEngine:
                 "frames_with_captions": frames_after_caption,
                 "captions_before_dedupe": captions_before_dedupe,
                 "embeddings_generated": len(embedded_frames),  # After dedupe
-                "embeddings_uploaded": actual_uploaded if upload_to_pinecone else 0,
+                "embeddings_uploaded_text": uploaded_text if upload_to_pinecone else 0,
+                "embeddings_uploaded_image": uploaded_image if upload_to_pinecone else 0,
                 "processing_time_seconds": processing_time,
                 "frame_reduction_percent": frame_reduction_pct,
                 "caption_stats": self.caption_generator.get_caption_statistics(captioned_frames),
@@ -388,12 +451,21 @@ class VideoSearchEngine:
                 normalize=True
             )
         
+        if not hasattr(self, 'clip_encoder'):
+            self.clip_encoder = ClipMultiModalEncoder(
+                model_name=self.config.CLIP_MODEL_NAME,
+                use_gpu=self.config.USE_GPU,
+                normalize=True
+            )
+
         if not self.pinecone_manager:
             self.pinecone_manager = PineconeManager(
                 api_key=self.config.PINECONE_API_KEY,
                 environment=self.config.PINECONE_ENVIRONMENT,
-                index_name=self.config.PINECONE_INDEX_NAME,
-                dimension=self.config.PINECONE_DIMENSION,
+                text_index_name=self.config.PINECONE_TEXT_INDEX_NAME,
+                text_dimension=self.config.PINECONE_TEXT_DIMENSION,
+                image_index_name=self.config.PINECONE_IMAGE_INDEX_NAME,
+                image_dimension=self.config.PINECONE_IMAGE_DIMENSION,
                 metric=self.config.PINECONE_METRIC,
                 host=getattr(self.config, 'PINECONE_HOST', None)
             )
@@ -401,21 +473,34 @@ class VideoSearchEngine:
         logger.info(f"Searching for: '{query}'")
         
         try:
-            # Generate query embedding
-            query_embedding = self.embedding_generator.encode_query(query)
-            
-            # Search in Pinecone
-            search_results = self.pinecone_manager.semantic_search(
-                query_embedding=query_embedding,
+            # Generate text query embedding (text index)
+            text_query_embedding = self.embedding_generator.encode_query(query)
+            text_results = self.pinecone_manager.semantic_search(
+                query_embedding=text_query_embedding,
                 top_k=top_k,
                 similarity_threshold=similarity_threshold,
                 video_filter=video_filter,
-                time_window=time_window
+                time_window=time_window,
+                target='text'
             )
+
+            # Generate CLIP text embedding to query image index
+            clip_text_embedding = self.clip_encoder.encode_query_text(query)
+            image_results = self.pinecone_manager.semantic_search(
+                query_embedding=clip_text_embedding,
+                top_k=top_k,
+                similarity_threshold=similarity_threshold,
+                video_filter=video_filter,
+                time_window=time_window,
+                target='image'
+            )
+
+            # Fuse results
+            fused = self._fuse_results(text_results, image_results)
             
             # Format results
             formatted_results = []
-            for result in search_results:
+            for result in fused:
                 formatted_result = {
                     "timestamp": result.timestamp,
                     "caption": result.caption,
@@ -433,6 +518,29 @@ class VideoSearchEngine:
         except Exception as e:
             logger.error(f"Search failed: {e}")
             raise
+
+    def _fuse_results(self, text_results: List[SearchResult], image_results: List[SearchResult]) -> List[SearchResult]:
+        """Fuse text and image search results by weighted score and deduplicate by frame/time."""
+        if not text_results and not image_results:
+            return []
+        tw = getattr(self.config, 'FUSION_TEXT_WEIGHT', 0.6)
+        iw = getattr(self.config, 'FUSION_IMAGE_WEIGHT', 0.4)
+        # Index by (video, frame_id, timestamp bucket)
+        fused: Dict[Tuple[str, str, int], SearchResult] = {}
+        def bucket(ts: float) -> int:
+            return int(ts * 10)  # 0.1s buckets to merge near-identical
+        for r in text_results:
+            key = (r.video_name, r.frame_id, bucket(r.timestamp))
+            fused[key] = SearchResult(id=r.id, score=r.score * tw, metadata=r.metadata, timestamp=r.timestamp, caption=r.caption, frame_id=r.frame_id, video_name=r.video_name)
+        for r in image_results:
+            key = (r.video_name, r.frame_id, bucket(r.timestamp))
+            if key in fused:
+                fused[key].score = min(1.0, fused[key].score + r.score * iw)
+            else:
+                fused[key] = SearchResult(id=r.id, score=r.score * iw, metadata=r.metadata, timestamp=r.timestamp, caption=r.caption, frame_id=r.frame_id, video_name=r.video_name)
+        out = list(fused.values())
+        out.sort(key=lambda x: x.score, reverse=True)
+        return out[: self.config.QUERY_TOP_K]
     
     def search_with_bootstrapping(self,
                                  primary_query: str,
@@ -547,6 +655,43 @@ class VideoSearchEngine:
         except Exception as e:
             logger.error(f"Temporal bootstrapping search failed: {e}")
             raise
+
+    def smart_search(self,
+                     query: str,
+                     top_k: int = None,
+                     similarity_threshold: float = None,
+                     video_filter: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Route between simple search and complex (bootstrapped) search.
+        - Simple: short queries or single-object queries -> standard semantic search
+        - Complex: multi-attribute/object queries -> temporal bootstrapping enabled
+        Always returns list of results for the primary query.
+        """
+        # Heuristic for complexity
+        q = (query or "").strip().lower()
+        tokens = q.split()
+        has_conjunctions = any(w in q for w in [" and ", " with ", ", ", " plus "])
+        has_attributes = any(w in tokens for w in [
+            "red","blue","green","yellow","black","white","gray","grey","brown","pink","orange","purple",
+            "small","large","big","tall","short","striped","patterned"
+        ])
+        is_complex = len(tokens) >= 3 and (has_conjunctions or has_attributes)
+
+        if not is_complex:
+            return self.search(query, top_k=top_k, similarity_threshold=similarity_threshold, video_filter=video_filter)
+
+        # Complex path: use bootstrapping
+        results_dict = self.search_with_bootstrapping(
+            primary_query=query,
+            related_queries=None,
+            top_k=top_k,
+            similarity_threshold=similarity_threshold,
+            video_filter=video_filter,
+            auto_extract_related=True
+        )
+
+        # Return primary query results if available
+        return results_dict.get(query, [])
     
     def _extract_related_queries(self, query: str) -> List[str]:
         """
@@ -616,6 +761,13 @@ class VideoSearchEngine:
                 "video_name": result.video_name,
                 "time_formatted": self._format_timestamp(result.timestamp)
             }
+            # Try to attach thumbnail path if we have the original video
+            thumb_path = self._maybe_extract_thumbnail(
+                video_name=result.video_name,
+                timestamp=result.timestamp
+            )
+            if thumb_path:
+                formatted_result["thumbnail_path"] = thumb_path
             formatted_results.append(formatted_result)
         return formatted_results
     
@@ -635,6 +787,13 @@ class VideoSearchEngine:
                 "video_name": result.video_name,
                 "time_formatted": self._format_timestamp(result.timestamp)
             }
+            # Include thumbnail if available
+            thumb_path = self._maybe_extract_thumbnail(
+                video_name=result.video_name,
+                timestamp=result.timestamp
+            )
+            if thumb_path:
+                formatted_result["thumbnail_path"] = thumb_path
             formatted_results.append(formatted_result)
         return formatted_results
     
@@ -684,6 +843,41 @@ class VideoSearchEngine:
             json.dump(stats, f, indent=2)
         
         logger.info(f"Processing report saved to: {report_path}")
+
+    def _maybe_extract_thumbnail(self, video_name: Optional[str], timestamp: float) -> Optional[str]:
+        """
+        Extract and cache a thumbnail image from the source video if path is known.
+        Returns a filesystem path to the thumbnail, or None if unavailable.
+        """
+        try:
+            if not video_name or video_name not in self.video_paths:
+                return None
+            import cv2
+            src_path = self.video_paths[video_name]
+            # Prepare output dir
+            out_dir = os.path.join(self.config.OUTPUT_DIR, video_name, "thumbnails")
+            os.makedirs(out_dir, exist_ok=True)
+            # Path based on timestamp (rounded to centiseconds)
+            ts_key = int(round(timestamp * 100))
+            out_path = os.path.join(out_dir, f"thumb_{ts_key}.jpg")
+            if os.path.exists(out_path):
+                return out_path
+            # Extract frame
+            cap = cv2.VideoCapture(src_path)
+            if not cap.isOpened():
+                return None
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+            frame_num = max(0, int(timestamp * fps))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+            ok, frame = cap.read()
+            cap.release()
+            if not ok or frame is None:
+                return None
+            # Save thumbnail
+            cv2.imwrite(out_path, frame)
+            return out_path
+        except Exception:
+            return None
     
     def get_index_stats(self) -> Dict:
         """Get Pinecone index statistics"""
@@ -723,56 +917,4 @@ class VideoSearchEngine:
             self.object_pipeline.unload_models()
         
         logger.info("Resources cleaned up")
-
-
-def demo_usage():
-    """Demonstrate usage of the Video Search Engine"""
-    
-    # Initialize engine
-    engine = VideoSearchEngine()
-    
-    # Example: Process a video
-    # stats = engine.process_video(
-    #     video_path="sample_video.mp4",
-    #     video_name="sample_demo",
-    #     save_frames=False,
-    #     upload_to_pinecone=True
-    # )
-    
-    # Example: Search for content
-    # results = engine.search(
-    #     query="person walking with a black bag",
-    #     top_k=5
-    # )
-    # 
-    # for result in results:
-    #     print(f"Time: {result['time_formatted']} - Score: {result['similarity_score']:.3f}")
-    #     print(f"  Caption: {result['caption']}")
-    #     print(f"  Video: {result['video_name']}")
-    #     print()
-    
-    # Example: Batch search
-    # queries = [
-    #     "black bag",
-    #     "yellow bottle",
-    #     "person walking",
-    #     "car driving"
-    # ]
-    # 
-    # batch_results = engine.batch_search(queries, top_k=3)
-    # 
-    # for query, results in batch_results.items():
-    #     print(f"\nQuery: '{query}' - Found {len(results)} results")
-    #     for result in results[:2]:  # Show top 2
-    #         print(f"  {result['time_formatted']} (score: {result['similarity_score']:.3f})")
-    
-    # Get index stats
-    stats = engine.get_index_stats()
-    print(f"Index statistics: {json.dumps(stats, indent=2)}")
-    
-    # Cleanup
-    engine.cleanup()
-
-
-if __name__ == "__main__":
-    demo_usage()
+ 

@@ -28,13 +28,15 @@ class SearchResult:
     video_name: str
 
 class PineconeManager:
-    """Manage Pinecone vector database operations"""
+    """Manage Pinecone vector database operations (dual index: text + image)"""
     
     def __init__(self,
                  api_key: str,
                  environment: str = "us-east-1",
-                 index_name: str = "capstone",
-                 dimension: int = 1024,
+                 text_index_name: str = "capstone-text",
+                 text_dimension: int = 1024,
+                 image_index_name: str = "capstone-image",
+                 image_dimension: int = 512,
                  metric: str = "cosine",
                  use_serverless: bool = True,
                  host: Optional[str] = None):
@@ -51,8 +53,10 @@ class PineconeManager:
         """
         self.api_key = api_key
         self.environment = environment
-        self.index_name = index_name
-        self.dimension = dimension
+        self.text_index_name = text_index_name
+        self.text_dimension = text_dimension
+        self.image_index_name = image_index_name
+        self.image_dimension = image_dimension
         self.metric = metric
         self.use_serverless = use_serverless
         self.host = host
@@ -60,8 +64,8 @@ class PineconeManager:
         # Initialize Pinecone
         self._initialize_pinecone()
         
-        # Connect to existing index (don't create)
-        self._setup_index()
+        # Connect to existing indexes (don't create)
+        self._setup_indexes()
     
     def _initialize_pinecone(self):
         """Initialize Pinecone client"""
@@ -74,29 +78,23 @@ class PineconeManager:
             logger.error(f"Failed to initialize Pinecone: {e}")
             raise
     
-    def _setup_index(self):
-        """Connect to existing Pinecone index"""
+    def _setup_indexes(self):
+        """Connect to existing Pinecone text and image indexes"""
         try:
-            # Check if index exists
             existing_indexes = self.pc.list_indexes()
-            index_exists = any(index.name == self.index_name for index in existing_indexes)
-            
-            if not index_exists:
-                logger.warning(f"Index '{self.index_name}' does not exist. It should already be created in Pinecone.")
-                logger.info(f"Attempting to connect anyway...")
-            else:
-                logger.info(f"Connecting to existing index: {self.index_name}")
-            
-            # Connect to index (use host if provided)
-            if self.host:
-                self.index = self.pc.Index(self.index_name, host=self.host)
-            else:
-                self.index = self.pc.Index(self.index_name)
-            
-            # Get index stats
-            stats = self.index.describe_index_stats()
-            logger.info(f"Index stats - Total vectors: {stats.get('total_vector_count', 0)}")
-            logger.info(f"Index dimension: {stats.get('dimension', 'unknown')}")
+            names = {idx.name for idx in existing_indexes}
+            if self.text_index_name not in names:
+                logger.warning(f"Text index '{self.text_index_name}' does not exist. Expected pre-created.")
+            if self.image_index_name not in names:
+                logger.warning(f"Image index '{self.image_index_name}' does not exist. Expected pre-created.")
+            # Connect
+            self.text_index = self.pc.Index(self.text_index_name)
+            self.image_index = self.pc.Index(self.image_index_name)
+            # Stats
+            tstats = self.text_index.describe_index_stats()
+            istats = self.image_index.describe_index_stats()
+            logger.info(f"Text index - Total vectors: {tstats.get('total_vector_count', 0)} | dim: {tstats.get('dimension', 'unknown')}")
+            logger.info(f"Image index - Total vectors: {istats.get('total_vector_count', 0)} | dim: {istats.get('dimension', 'unknown')}")
             
         except Exception as e:
             logger.error(f"Failed to setup index: {e}")
@@ -143,7 +141,8 @@ class PineconeManager:
                          data: List[Tuple[str, List[float], Dict]],
                          batch_size: int = 100,
                          namespace: str = "",
-                         max_retries: int = 3) -> int:
+                         max_retries: int = 3,
+                         target: str = 'text') -> int:
         """
         Upload embeddings to Pinecone with retry logic
         
@@ -163,7 +162,7 @@ class PineconeManager:
         
         try:
             # Upload in batches
-            for i in tqdm(range(0, len(data), batch_size), desc="Uploading to Pinecone"):
+            for i in tqdm(range(0, len(data), batch_size), desc=f"Uploading to Pinecone ({target})"):
                 batch = data[i:i + batch_size]
                 
                 # Prepare vectors for upsert
@@ -179,7 +178,8 @@ class PineconeManager:
                 success = False
                 for attempt in range(max_retries):
                     try:
-                        response = self.index.upsert(vectors=vectors, namespace=namespace)
+                        index = self.text_index if target == 'text' else self.image_index
+                        response = index.upsert(vectors=vectors, namespace=namespace)
                         uploaded_count += response.get('upserted_count', len(vectors))
                         success = True
                         break
@@ -209,7 +209,8 @@ class PineconeManager:
              top_k: int = 10,
              filter: Optional[Dict] = None,
              namespace: str = "",
-             include_metadata: bool = True) -> List[SearchResult]:
+             include_metadata: bool = True,
+             target: str = 'text') -> List[SearchResult]:
         """
         Query the Pinecone index
         
@@ -228,7 +229,8 @@ class PineconeManager:
             query_vector_list = query_vector.tolist()
             
             # Query index
-            results = self.index.query(
+            index = self.text_index if target == 'text' else self.image_index
+            results = index.query(
                 vector=query_vector_list,
                 top_k=top_k,
                 filter=filter,
@@ -263,7 +265,8 @@ class PineconeManager:
                        top_k: int = 10,
                        similarity_threshold: float = 0.6,
                        video_filter: Optional[str] = None,
-                       time_window: Optional[Tuple[float, float]] = None) -> List[SearchResult]:
+                       time_window: Optional[Tuple[float, float]] = None,
+                       target: str = 'text') -> List[SearchResult]:
         """
         Perform semantic search with filtering
         
@@ -293,7 +296,8 @@ class PineconeManager:
         results = self.query(
             query_vector=query_embedding,
             top_k=top_k * 2,  # Get more results for filtering
-            filter=metadata_filter if metadata_filter else None
+            filter=metadata_filter if metadata_filter else None,
+            target=target
         )
         
         # Filter by similarity threshold
@@ -441,12 +445,21 @@ class PineconeManager:
     def get_index_stats(self) -> Dict:
         """Get index statistics"""
         try:
-            stats = self.index.describe_index_stats()
+            tstats = self.text_index.describe_index_stats()
+            istats = self.image_index.describe_index_stats()
             return {
-                'total_vectors': stats.get('total_vector_count', 0),
-                'dimension': stats.get('dimension', self.dimension),
-                'index_fullness': stats.get('index_fullness', 0),
-                'namespaces': stats.get('namespaces', {})
+                'text': {
+                    'total_vectors': tstats.get('total_vector_count', 0),
+                    'dimension': tstats.get('dimension', self.text_dimension),
+                    'index_fullness': tstats.get('index_fullness', 0),
+                    'namespaces': tstats.get('namespaces', {})
+                },
+                'image': {
+                    'total_vectors': istats.get('total_vector_count', 0),
+                    'dimension': istats.get('dimension', self.image_dimension),
+                    'index_fullness': istats.get('index_fullness', 0),
+                    'namespaces': istats.get('namespaces', {})
+                }
             }
             
         except Exception as e:
