@@ -1,9 +1,10 @@
 """
 Temporal Bootstrapping Module
-Implements three key features:
+Implements two key features:
 1. Temporal Bootstrapping: Find related objects at similar timestamps
-2. Adaptive Window: Adjust search window based on motion intensity
-3. Confidence-Aware: Weight boosts by detection confidence
+2. Confidence-Aware: Weight boosts by detection confidence
+
+Note: Uses fixed window size (suitable for stationary surveillance cameras)
 """
 
 import numpy as np
@@ -12,7 +13,6 @@ from typing import List, Dict, Tuple, Optional, Set
 from dataclasses import dataclass
 from collections import defaultdict
 
-from motion_analyzer import MotionAnalyzer, MotionData
 from pinecone_manager import SearchResult, PineconeManager
 
 # Configure logging
@@ -30,35 +30,30 @@ class BoostedResult:
 
 class TemporalBootstrapper:
     """
-    Implements temporal bootstrapping with adaptive windows and confidence-aware boosting
+    Implements temporal bootstrapping with fixed window and confidence-aware boosting
+    Suitable for stationary surveillance cameras
     """
     
     def __init__(self,
-                 motion_analyzer: Optional[MotionAnalyzer] = None,
                  base_boost_factor: float = 0.3,
                  confidence_weight: float = 1.0,
                  min_confidence_threshold: float = 0.5,
-                 min_window_seconds: float = 1.0,
-                 max_window_seconds: float = 5.0):
+                 fixed_window_seconds: float = 2.0):
         """
         Initialize temporal bootstrapper
         
         Args:
-            motion_analyzer: Motion analyzer instance
             base_boost_factor: Base boost factor (0.0 to 1.0)
             confidence_weight: How much to weight confidence (0.0 to 2.0)
             min_confidence_threshold: Minimum confidence to apply boost
-            min_window_seconds: Minimum temporal window (slow scenes)
-            max_window_seconds: Maximum temporal window (fast scenes)
+            fixed_window_seconds: Fixed temporal window size (for stationary cameras)
         """
-        self.motion_analyzer = motion_analyzer or MotionAnalyzer()
         self.base_boost_factor = base_boost_factor
         self.confidence_weight = confidence_weight
         self.min_confidence_threshold = min_confidence_threshold
-        self.min_window_seconds = min_window_seconds
-        self.max_window_seconds = max_window_seconds
+        self.fixed_window_seconds = fixed_window_seconds
         
-        logger.info("Temporal bootstrapper initialized")
+        logger.info("Temporal bootstrapper initialized (fixed window for stationary cameras)")
     
     def bootstrap_search(self,
                         primary_results: List[SearchResult],
@@ -73,13 +68,9 @@ class TemporalBootstrapper:
         
         Part 1: Temporal Bootstrapping
         - Find primary objects (e.g., "red shirt") in primary_results
-        - Search for related objects (e.g., "blue bag") at similar timestamps
+        - Search for related objects (e.g., "blue bag") at similar timestamps using fixed window
         
-        Part 2: Adaptive Window
-        - Analyze motion at primary object timestamps
-        - Use larger windows for fast motion, smaller for slow motion
-        
-        Part 3: Confidence-Aware
+        Part 2: Confidence-Aware
         - Weight boosts by primary detection confidence
         - High confidence detections boost related objects more
         
@@ -88,47 +79,31 @@ class TemporalBootstrapper:
             related_queries: List of (query_text, query_embedding) tuples for related objects
             pinecone_manager: Pinecone manager for searching
             video_name: Name of video (for filtering)
-            video_path: Path to video (for motion analysis)
-            frame_timestamps: Timestamps of frames (for motion analysis)
+            video_path: Path to video (unused, kept for compatibility)
+            frame_timestamps: Timestamps of frames (unused, kept for compatibility)
             top_k_per_query: Number of results per related query
             
         Returns:
             Dictionary mapping query texts to boosted results
         """
         logger.info(f"Starting temporal bootstrapping with {len(primary_results)} primary results "
-                   f"and {len(related_queries)} related queries")
+                   f"and {len(related_queries)} related queries (fixed window: {self.fixed_window_seconds}s)")
         
-        # Step 1: Analyze motion if video available
-        motion_data = None
-        if video_path and frame_timestamps:
-            try:
-                motion_data = self.motion_analyzer.analyze_video(
-                    video_path=video_path,
-                    frame_timestamps=frame_timestamps
-                )
-                logger.info(f"Computed motion data for {len(motion_data)} timestamps")
-            except Exception as e:
-                logger.warning(f"Failed to analyze motion: {e}")
-        
-        # Step 2: Extract primary object timestamps and confidences
+        # Step 1: Extract primary object timestamps and confidences
         primary_timestamps = self._extract_timestamps_and_confidences(primary_results)
         
-        # Step 3: For each related query, search with adaptive windows
+        # Step 2: For each related query, search with fixed window
         all_boosted_results = {}
         
         for query_text, query_embedding in related_queries:
             logger.info(f"Processing related query: '{query_text}'")
             
-            # Search for related objects at each primary timestamp with adaptive window
+            # Search for related objects at each primary timestamp with fixed window
             query_results = []
             
             for primary_ts, primary_confidence in primary_timestamps:
-                # Compute adaptive window based on motion
-                window_size = self._compute_adaptive_window(
-                    timestamp=primary_ts,
-                    motion_data=motion_data,
-                    base_window=2.0
-                )
+                # Use fixed window size (suitable for stationary cameras)
+                window_size = self.fixed_window_seconds
                 
                 # Define time window around primary timestamp
                 time_window = (max(0, primary_ts - window_size),
@@ -182,40 +157,6 @@ class TemporalBootstrapper:
         for result in results:
             timestamps_confidences.append((result.timestamp, result.score))
         return timestamps_confidences
-    
-    def _compute_adaptive_window(self,
-                                 timestamp: float,
-                                 motion_data: Optional[Dict[float, MotionData]],
-                                 base_window: float = 2.0) -> float:
-        """
-        Compute adaptive search window based on motion at timestamp
-        
-        Args:
-            timestamp: Target timestamp
-            motion_data: Motion analysis data
-            base_window: Base window size if no motion data
-            
-        Returns:
-            Adaptive window size in seconds
-        """
-        if motion_data is None or not motion_data:
-            # No motion data - use base window
-            return base_window
-        
-        # Get motion intensity at timestamp
-        motion_intensity = self.motion_analyzer.get_motion_at_timestamp(
-            timestamp, motion_data
-        )
-        
-        # Compute adaptive window
-        window_size = self.motion_analyzer.compute_adaptive_window_size(
-            motion_intensity=motion_intensity,
-            base_window=base_window,
-            min_window=self.min_window_seconds,
-            max_window=self.max_window_seconds
-        )
-        
-        return window_size
     
     def _apply_confidence_aware_boost(self,
                                      search_results: List[SearchResult],

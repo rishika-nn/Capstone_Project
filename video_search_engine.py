@@ -20,7 +20,6 @@ from caption_generator import BlipCaptionGenerator, CaptionedFrame
 from embedding_generator import TextEmbeddingGenerator, EmbeddedFrame, ClipMultiModalEncoder, extract_object_attribute_tags
 from pinecone_manager import PineconeManager, SearchResult
 from object_caption_pipeline import ObjectCaptionPipeline, ObjectCaption
-from motion_analyzer import MotionAnalyzer
 from temporal_bootstrapping import TemporalBootstrapper, BoostedResult
 
 # Configure logging
@@ -62,7 +61,6 @@ class VideoSearchEngine:
         self.embedding_generator = None
         self.pinecone_manager = None
         self.object_pipeline = None  # Object-focused captioning pipeline
-        self.motion_analyzer = None  # Motion analyzer for adaptive windows
         self.temporal_bootstrapper = None  # Temporal bootstrapping module
         
         # Processing state
@@ -124,22 +122,14 @@ class VideoSearchEngine:
     
     def _initialize_temporal_bootstrapping(self):
         """Initialize temporal bootstrapping components if not already initialized"""
-        if not self.motion_analyzer:
-            self.motion_analyzer = MotionAnalyzer(
-                use_gpu=self.config.USE_GPU
-            )
-            logger.info("Motion analyzer initialized")
-        
         if not self.temporal_bootstrapper:
             self.temporal_bootstrapper = TemporalBootstrapper(
-                motion_analyzer=self.motion_analyzer,
                 base_boost_factor=self.config.TEMPORAL_BOOST_FACTOR,
                 confidence_weight=self.config.CONFIDENCE_WEIGHT,
                 min_confidence_threshold=self.config.MIN_CONFIDENCE_THRESHOLD,
-                min_window_seconds=self.config.MIN_WINDOW_SECONDS,
-                max_window_seconds=self.config.MAX_WINDOW_SECONDS
+                fixed_window_seconds=self.config.BASE_WINDOW_SECONDS
             )
-            logger.info("Temporal bootstrapper initialized")
+            logger.info("Temporal bootstrapper initialized (fixed window for stationary cameras)")
     
     def process_video(self, 
                      video_path: str,
@@ -552,9 +542,8 @@ class VideoSearchEngine:
         """
         Search with temporal bootstrapping
         
-        Part 1: Temporal Bootstrapping - Finds related objects at similar timestamps
-        Part 2: Adaptive Window - Adjusts search window based on motion
-        Part 3: Confidence-Aware - Weights boosts by detection confidence
+        Part 1: Temporal Bootstrapping - Finds related objects at similar timestamps (fixed window)
+        Part 2: Confidence-Aware - Weights boosts by detection confidence
         
         Args:
             primary_query: Primary search query (e.g., "red shirt")
